@@ -146,6 +146,62 @@ enum EventStreamItem: Sendable {
     case terminated(MCPError)
 }
 
+/// `@unchecked Sendable`: `lock` guards every field.
+final class EventCheckWake: @unchecked Sendable {
+    private let lock = NSLock()
+    private var owed = false
+    private var generation = 0
+    private var ended = 0
+    private var waiter: CheckedContinuation<Void, Never>?
+
+    func wake() {
+        let waiter = lock.withLock { () -> CheckedContinuation<Void, Never>? in
+            owed = true
+            defer { self.waiter = nil }
+            return self.waiter
+        }
+        waiter?.resume()
+    }
+
+    func beginCheck() {
+        lock.withLock { owed = false }
+    }
+
+    func wait(for interval: Duration) async {
+        let generation = lock.withLock { () -> Int in
+            self.generation += 1
+            return self.generation
+        }
+        let timer = Task { [self] in
+            try await Task.sleep(for: interval)
+            end(generation)
+        }
+        defer { timer.cancel() }
+        await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                let waiting = lock.withLock { () -> Bool in
+                    guard !owed, ended < generation else { return false }
+                    waiter = continuation
+                    return true
+                }
+                if !waiting { continuation.resume() }
+            }
+        } onCancel: {
+            end(generation)
+        }
+    }
+
+    private func end(_ generation: Int) {
+        let waiter = lock.withLock { () -> CheckedContinuation<Void, Never>? in
+            guard ended < generation else { return nil }
+            ended = generation
+            defer { self.waiter = nil }
+            return self.waiter
+        }
+        waiter?.resume()
+    }
+}
+
 /// The event types of one or more servers, the buffer of their emitted
 /// occurrences, and their open `events/stream` streams.
 ///
@@ -160,7 +216,7 @@ public actor EventRegistry {
         public var heartbeatRange: ClosedRange<Duration>
         /// The `nextPollMs` of poll results.
         public var pollInterval: Duration
-        /// How often a stream of a `check` type checks its upstream.
+        /// How often a stream of a `check` type checks its upstream; ``EventRegistry/wake(_:)`` checks sooner.
         public var checkInterval: Duration
         /// The events a poll returns when it sets no `maxEvents`, and a `check` is asked for on streams.
         public var defaultMaxEvents: Int
@@ -201,6 +257,7 @@ public actor EventRegistry {
         let match: (@Sendable (EventOccurrence, [String: Value]) -> Bool)?
         let context: Server.HandlerContext
         let items: AsyncStream<EventStreamItem>.Continuation
+        let wake: EventCheckWake
     }
 
     struct StreamStart: Sendable {
@@ -309,6 +366,19 @@ public actor EventRegistry {
         terminateStreams(of: name, with: error, where: accepts)
     }
 
+    /// Makes every `events/stream` stream of the `check` type `name` check
+    /// its upstream now instead of at the end of its `checkInterval`.
+    ///
+    /// Call it when the upstream changes. Wakes before a stream's next check
+    /// starts share that check; a stream that is checking checks again when
+    /// it is done. `events/poll`, heartbeats and emit-only types are not
+    /// affected, and a name without streams is ignored.
+    public func wake(_ name: String) {
+        for stream in streams.values where stream.name == name {
+            stream.wake.wake()
+        }
+    }
+
     /// The number of open `events/stream` streams.
     public var openStreamCount: Int { streams.count }
 
@@ -356,7 +426,7 @@ public actor EventRegistry {
     /// Registration and replay happen in one actor step, so no occurrence is lost or repeated.
     func openStream(
         _ params: StreamEvents.Parameters, type: EventType, context: Server.HandlerContext,
-        items: AsyncStream<EventStreamItem>.Continuation
+        items: AsyncStream<EventStreamItem>.Continuation, wake: EventCheckWake
     ) throws -> (token: Int, start: StreamStart) {
         guard streams.count < configuration.maxStreams else {
             throw MCPError.resourceExhausted(
@@ -367,7 +437,8 @@ public actor EventRegistry {
         let token = nextStreamToken
         nextStreamToken += 1
         streams[token] = Stream(
-            name: type.name, arguments: params.arguments, match: type.match, context: context, items: items)
+            name: type.name, arguments: params.arguments, match: type.match, context: context, items: items,
+            wake: wake)
         guard type.check == nil else {
             return (token, StreamStart(cursor: nil, truncated: false, replay: []))
         }
@@ -559,12 +630,13 @@ extension Server {
             bufferingPolicy: .bufferingOldest(max(1, registry.buffer.maxEvents)))
         try beginEventStream(context.id, continuation)
         defer { endEventStream(context.id) }
+        let wake = EventCheckWake()
         // Registered before `active`, so no occurrence emitted meanwhile is lost.
         let (token, start) = try await registry.openStream(
-            params, type: type, context: context, items: continuation)
+            params, type: type, context: context, items: continuation, wake: wake)
         do {
             let result = try await streamEvents(
-                params, type: type, start: start, items: items, continuation: continuation,
+                params, type: type, start: start, items: items, continuation: continuation, wake: wake,
                 heartbeat: heartbeat, heartbeatMs: heartbeatMs, maxEvents: maxEvents, context: context,
                 checkInterval: registry.configuration.checkInterval)
             await registry.closeStream(token)
@@ -578,7 +650,8 @@ extension Server {
     private func streamEvents(
         _ params: StreamEvents.Parameters, type: EventType, start: EventRegistry.StreamStart,
         items: AsyncStream<EventStreamItem>, continuation: AsyncStream<EventStreamItem>.Continuation,
-        heartbeat: Duration, heartbeatMs: Int, maxEvents: Int, context: HandlerContext, checkInterval: Duration
+        wake: EventCheckWake, heartbeat: Duration, heartbeatMs: Int, maxEvents: Int, context: HandlerContext,
+        checkInterval: Duration
     ) async throws -> StreamEvents.Result {
         let id = context.id
         var meta = Metadata()
@@ -589,6 +662,7 @@ extension Server {
         var replay = start.replay
         var hasMore = false
         if let check = type.check {
+            wake.beginCheck()
             let batch = try await check(
                 EventCheck(
                     name: type.name, arguments: params.arguments, cursor: params.cursor, maxEvents: maxEvents,
@@ -628,8 +702,10 @@ extension Server {
                 var immediate = hasMore
                 while !Task.isCancelled {
                     if !immediate {
-                        guard (try? await Task.sleep(for: checkInterval)) != nil else { return }
+                        await wake.wait(for: checkInterval)
+                        guard !Task.isCancelled else { return }
                     }
+                    wake.beginCheck()
                     do {
                         let batch = try await check(
                             EventCheck(

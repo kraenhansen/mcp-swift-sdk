@@ -532,6 +532,143 @@ struct EventServerTests {
             ])
         #expect(await registry.openStreamCount == 0)
     }
+
+    @Test("wake makes a sleeping stream check at once, well before checkInterval")
+    func wake() async throws {
+        let (log, probe) = (ChangeLog(), CheckProbe())
+        let registry = EventRegistry([probedTickets(log, probe)], configuration: slowChecks)
+        let (server, peer) = try await serve(registry)
+        defer { Task { await peer.stop(); await server.stop() } }
+
+        try await peer.send(request("s", StreamEvents.name, ["name": "ticket"]))
+        #expect(await eventually { await stream(peer, "s").count == 1 })
+        await log.add("t1")
+        let woken = ContinuousClock.now
+        await registry.wake("ticket")
+        #expect(await eventually { await stream(peer, "s").contains { params($0)["eventId"] == "t1" } })
+        #expect(ContinuousClock.now - woken < slowChecks.checkInterval / 10)
+        #expect(await probe.calls == 2)
+        try await peer.send(cancel("s"))
+    }
+
+    @Test("Several wakes cause one extra check; wakes during a check make the stream check again right after")
+    func wakesCoalesce() async throws {
+        let (log, probe) = (ChangeLog(), CheckProbe())
+        let registry = EventRegistry([probedTickets(log, probe)], configuration: slowChecks)
+        let (server, peer) = try await serve(registry)
+        defer { Task { await peer.stop(); await server.stop() } }
+
+        try await peer.send(request("s", StreamEvents.name, ["name": "ticket"]))
+        #expect(await eventually { await stream(peer, "s").count == 1 })
+        await probe.hold()
+        await registry.wake("ticket")
+        #expect(await eventually { await probe.calls == 2 })
+        await log.add("t1")
+        for _ in 0..<3 { await registry.wake("ticket") }
+        await probe.release()
+        #expect(await eventually { await stream(peer, "s").contains { params($0)["eventId"] == "t1" } })
+        try await peer.sync("after")
+        #expect(await probe.calls == 3)
+        #expect(methods(await stream(peer, "s")) == [EventsActiveNotification.name, EventNotification.name])
+        try await peer.send(cancel("s"))
+    }
+
+    @Test("Waking an unknown type, an emit-only type, or a type without streams does nothing")
+    func wakeWithoutStreams() async throws {
+        let (log, probe) = (ChangeLog(), CheckProbe())
+        let registry = EventRegistry([probedTickets(log, probe), EventType(name: "a")], configuration: slowChecks)
+        let (server, peer) = try await serve(registry)
+        defer { Task { await peer.stop(); await server.stop() } }
+
+        await registry.wake("unknown")
+        await registry.wake("ticket")
+        #expect(await probe.calls == 0)
+
+        try await peer.send(request("s", StreamEvents.name, ["name": "ticket"]))
+        #expect(await eventually { await stream(peer, "s").count == 1 })
+        try await peer.send(cancel("s"))
+        #expect(await eventually { await registry.openStreamCount == 0 })
+        await registry.wake("ticket")
+
+        try await peer.send(request("e", StreamEvents.name, ["name": "a"]))
+        #expect(await eventually { await stream(peer, "e").count == 1 })
+        await registry.wake("a")
+        try await registry.emit("a", data: [:])
+        #expect(await eventually { await stream(peer, "e").count == 2 })
+        try await peer.sync("after")
+        #expect(methods(await stream(peer, "e")) == [EventsActiveNotification.name, EventNotification.name])
+        #expect(await probe.calls == 1)
+        try await peer.send(cancel("e"))
+    }
+
+    @Test("Wakes leave events/poll and heartbeats alone")
+    func wakeLeavesPollsAndHeartbeats() async throws {
+        let (log, probe) = (ChangeLog(), CheckProbe())
+        let registry = EventRegistry([probedTickets(log, probe)], configuration: slowChecks)
+        let (server, peer) = try await serve(registry)
+        defer { Task { await peer.stop(); await server.stop() } }
+
+        try await peer.send(request("s", StreamEvents.name, ["name": "ticket", "heartbeatMs": 300_000]))
+        #expect(await eventually { await stream(peer, "s").count == 1 })
+        let quiet = try await result(peer, "0", PollEvents.name, ["name": "ticket", "cursor": "0"])
+        #expect(quiet["events"] == [])
+        await log.add("t1")
+        for _ in 0..<3 { await registry.wake("ticket") }
+        #expect(await eventually { await stream(peer, "s").contains { params($0)["eventId"] == "t1" } })
+        let polled = try await result(peer, "1", PollEvents.name, ["name": "ticket", "cursor": "0"])
+        #expect(polled["events"]?.arrayValue?.map { $0.objectValue?["eventId"] } == ["t1"])
+        #expect(polled["nextPollMs"] == quiet["nextPollMs"])
+        #expect(params(await stream(peer, "s").first)["heartbeatMs"] == 300_000)
+        #expect(!methods(await stream(peer, "s")).contains(EventsHeartbeatNotification.name))
+
+        try await peer.send(request("h", StreamEvents.name, ["name": "ticket", "heartbeatMs": 10]))
+        #expect(await eventually { await stream(peer, "h").count == 1 })
+        for _ in 0..<3 { await registry.wake("ticket") }
+        #expect(
+            await eventually {
+                methods(await stream(peer, "h")).filter { $0 == EventsHeartbeatNotification.name }.count >= 3
+            })
+        try await peer.send(cancel("s"))
+        try await peer.send(cancel("h"))
+    }
+}
+
+private let slowChecks = EventRegistry.Configuration(
+    heartbeatRange: .milliseconds(10)...(.seconds(300)), checkInterval: .seconds(60))
+
+private func probedTickets(_ log: ChangeLog, _ probe: CheckProbe) -> EventType {
+    EventType(
+        name: "ticket",
+        check: { check in
+            let changes = await log.changes
+            await probe.enter()
+            guard let cursor = check.cursor, let from = Int(cursor) else {
+                return EventBatch(cursor: String(changes.count))
+            }
+            let to = min(changes.count, from + check.maxEvents)
+            return EventBatch(
+                events: changes[from..<to].map { EventBatch.Event(eventId: $0, data: ["id": .string($0)]) },
+                cursor: String(to), hasMore: to < changes.count)
+        })
+}
+
+private actor CheckProbe {
+    private(set) var calls = 0
+    private var holds = false
+    private var gate: CheckedContinuation<Void, Never>?
+
+    func hold() { holds = true }
+
+    func release() {
+        holds = false
+        gate?.resume()
+        gate = nil
+    }
+
+    func enter() async {
+        calls += 1
+        if holds { await withCheckedContinuation { gate = $0 } }
+    }
 }
 
 private actor ChangeLog {

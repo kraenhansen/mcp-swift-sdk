@@ -11,6 +11,7 @@ This guide covers the `Client` actor: connecting at either protocol era, calling
 1. [Multi round-trip requests](#multi-round-trip-requests)
 1. [Tasks](#tasks)
 1. [Skills](#skills)
+1. [Events](#events)
 1. [Server Cards](#server-cards)
 1. [MCP Apps](#mcp-apps)
 1. [Notifications and subscriptions](#notifications-and-subscriptions)
@@ -358,6 +359,20 @@ Each throws -32601 without a request when the server does not declare the extens
 | `enforcesLimits` | `true` | Refuse skills of more than 512 files or 16 MiB |
 
 The SDK verifies; the host decides. Ask the user before a skill is used, and bind the approval to `Skill.manifestFingerprint`, which changes when any file does. Identify a skill by the server and its URI, never by its name: two servers, or two skills of one server, may share a name. A `SKILL.md` read with plain `readResource(uri:)` is not a loaded skill.
+
+## Events
+
+A server that declares the events extension (SEP-3415, Beta) at 2026-07-28 lists event types and delivers their occurrences. `listEvents(cursor:)` lists the types; each says which `delivery` modes it supports. A push stream delivers occurrences as they happen:
+
+%include Examples/Snippets/Client/Events.swift client-events
+
+`streamEvents(_:)` returns once the server sent `notifications/events/active`, as `EventSubscription.active`, and routes the stream's later messages by its `subscriptionId` to `messages`: occurrences, heartbeats, a later `active` after a gap, and recoverable errors. `messages` ends without an error when the server closes the stream or after `cancel()`, and throws the error of `notifications/events/terminated`: `NotFound` or `Unsupported` mean the type changed, so list the types again; `Forbidden` means stop.
+
+Persist the latest cursor, from an occurrence, a heartbeat or an `active`, and pass it on the next subscription: the server replays what happened since, bounded by `maxAgeMs`. `truncated: true` says occurrences were skipped; fetch what matters with tools. `eventId` is stable per upstream event, for deduplication. A poll needs no open stream:
+
+%include Examples/Snippets/Client/Events.swift client-events-poll
+
+Each call throws -32601 without a request when the server does not declare the extension (`serverEvents` is `nil`). The client does not choose a mode, poll on a timer or reconnect a stream that ended; the application does, from the cursor it kept. Register `onNotification(EventsListChangedNotification.self)` and listen with `eventsListChanged: true` to learn when the types change.
 
 ## Server Cards
 

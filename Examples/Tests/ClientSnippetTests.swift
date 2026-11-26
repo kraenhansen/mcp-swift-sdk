@@ -629,3 +629,30 @@ struct ClientServerCardSnippetTests {
         #expect(try await checkCard(card, with: client).map(\.field) == [.name, .version])
     }
 }
+
+@Suite("Client event snippets", .timeLimit(.minutes(1)))
+struct ClientEventSnippetTests {
+    @Test("Follow a stream, then poll from its cursor")
+    func followThenPoll() async throws {
+        let registry = EventRegistry(await incidents.eventTypes)
+        let server = Server(name: "pager", version: "1")
+        await server.withEvents(registry)
+        let client = Client(name: "test", version: "1.0")
+        try await client.connect(transport: try await start(server))
+
+        let following = Task { try await followIncidents(client, from: nil, limit: 1) }
+        let deadline = ContinuousClock.now + .seconds(5)
+        while await registry.openStreamCount == 0, ContinuousClock.now < deadline {
+            try await Task.sleep(for: .milliseconds(5))
+        }
+        try await registry.emit("incident.created", data: ["incidentId": "INC-1", "severity": "P1"], eventId: "INC-1")
+        let followed = try await following.value
+        #expect(followed.incidents == ["INC-1"])
+
+        try await registry.emit("incident.created", data: ["incidentId": "INC-2", "severity": "P2"], eventId: "INC-2")
+        let polled = try await pollIncidents(client, from: followed.cursor)
+        #expect(polled.incidents == ["INC-2"])
+        await client.disconnect()
+        await server.stop()
+    }
+}

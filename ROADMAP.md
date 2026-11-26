@@ -59,6 +59,16 @@ Frontmatter is YAML 1.2 (core schema) through Yams, as the conformance harness r
 server passes the 3 `sep-2640-*` server scenarios and the client the 4 client scenarios; no
 other SDK implements the extension.
 
+### Events
+
+| Feature | SEP | API | Design |
+|---|---|---|---|
+| The `io.modelcontextprotocol/events` extension at 2026-07-28: `events/list`, `events/poll`, `events/stream` (`active`, `event`, `heartbeat`, `error`, `terminated`, replay from a cursor), `notifications/events/list_changed` on `subscriptions/listen`, error codes -32023 to -32027, `Mcp-Name` routing | SEP-3415 | `Server.withEvents(_:)`, `EventRegistry`, `EventType`, `EventBuffer`, `SubscriptionFilter.eventsListChanged`; `Client.listEvents(cursor:)`, `pollEvents(_:)`, `streamEvents(_:)`, `EventSubscription` | [events.md](design/events.md) |
+
+The extension is Beta. Webhook delivery (`events/subscribe`, `events/unsubscribe`) and the
+client's mode selection, poll loop and reconnection are not implemented. The pinned harness has
+no events scenarios.
+
 ### Server Cards
 
 | Feature | SEP | API | Design |
@@ -181,6 +191,7 @@ A change that implements a SEP updates its row.
 | 2640 | Skills | Extensions | Implemented | [Skills](#skills) |
 | 2663 | Tasks extension | Extensions | Implemented | [Tasks](#tasks) |
 | 3398 | Release cycle updates (Accepted) | Process | Not applicable | Process. |
+| 3415 | Events extension | Extensions | Partial | [Events](#events): poll and push; webhook delivery is Planned |
 
 ## Conformance
 

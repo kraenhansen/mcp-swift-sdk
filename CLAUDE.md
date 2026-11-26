@@ -266,6 +266,19 @@ regenerates `Tests/MCPTests/Generated/FrontmatterCorpus.swift` from the harness 
 - Fixtures: everything-server serves `pdf-processing` and `acme/billing/refunds`;
   everything-client lists (`no-prefetch`) or loads (`verify-*`). Default leg only.
 
+## Events (SEP-3415)
+
+`io.modelcontextprotocol/events` (`design/events.md`), Beta, 2026-07-28 only (stripped from
+`initialize` capabilities; `events/*` in `statelessOnlyMethods`). `Base/EventTypes.swift`:
+`ListEvents`, `PollEvents`, `StreamEvents`, the `notifications/events/*` types,
+`EventOccurrence`, `EventDescriptor`, `MCPError.Code.notFound`...`callbackEndpointError`
+(-32023 to -32027). `Server/Events.swift`: `EventType` (`validate`, `check`, `match`),
+`EventRegistry` (shared by servers; emit buffer with `<epoch>.<sequence>` cursors; open
+streams), `withEvents`; the stream handler follows `serveListen` (open and replay in one
+registry step, `active` first, heartbeat and check tasks feeding one `AsyncStream`);
+`stop()` finishes `eventStreams`. `Client/ClientEvents.swift`: `listEvents`, `pollEvents`,
+`streamEvents` (`EventSubscription`, routed inline by `subscriptionId`). No webhook delivery.
+
 ## Server Cards (SEP-2127)
 
 Outside the protocol (`design/server_cards.md`), pinned to `modelcontextprotocol/ext-server-card`

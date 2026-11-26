@@ -450,6 +450,28 @@ A `SkillCatalog` answers four questions: a page of the listing, the entry of a s
 
 %include Examples/Snippets/Server/Skills.swift skills-catalog
 
+## Events
+
+The events extension (SEP-3415, Beta) lets a client subscribe to things that happen upstream, such as a new incident or a changed ticket, and receive their occurrences without asking for each one. A server lists its event types with `events/list`; a client polls one subscription with `events/poll` or holds a push stream open with `events/stream`. Webhook delivery (`events/subscribe`) is not implemented. The extension exists at 2026-07-28 only: a handshake client sees no `events` capability and gets -32601 for `events/*`.
+
+An `EventRegistry` holds the event types, the buffer of their emitted occurrences and their open streams. `withEvents(_:)` serves it; servers that serve the same clients, such as one per stdio pipe, share one registry, so one `emit` reaches every stream:
+
+%include Examples/Snippets/Server/Events.swift events-server
+
+The server then:
+
+- declares `extensions["io.modelcontextprotocol/events"]` with `listChanged: true` in `server/discover`, and sends `notifications/events/list_changed` on the listen streams that set `SubscriptionFilter.eventsListChanged` when `register(_:)` or `unregister(_:)` changes the types;
+- answers `events/list` with every type, `events/poll` from the buffer or the type's `check`, and `events/stream` with `notifications/events/active` first, then the occurrences, `notifications/events/heartbeat` every granted `heartbeatMs` with the cursor to persist, and `notifications/events/error` for a failed `check`;
+- refuses an unknown name with `NotFound` (-32023, `data.kind: "event"`), a mode the type does not list in `delivery` with `Unsupported` (-32026), more than `maxStreams` streams with `ResourceExhausted` (-32025), and whatever the type's `validate` throws, such as `MCPError.forbidden()` (-32024).
+
+An emit-only type, one without `check`, is served from the registry's buffer (`EventBuffer`, by default 10 minutes and 10,000 occurrences per type). Its cursors name the process: a cursor from before a restart, or one the buffer has evicted, gets `truncated: true` and a fresh cursor, and so does one older than the request's `maxAgeMs`. `match` decides which subscriptions, by their arguments, receive an occurrence; a stream still advances its cursor past the ones it skips. A stream whose client falls `maxEvents` occurrences behind is closed with its result, and the client resumes from its cursor.
+
+A type whose upstream can answer "what happened since this cursor" has a `check` function instead. The same function serves poll and push: a poll calls it once, and a stream calls it every `checkInterval`, or at once while it returns `hasMore`. A `check` asked for a `nil` cursor returns the current position and no events:
+
+%include Examples/Snippets/Server/Events.swift events-check
+
+To end subscriptions, `unregister(_:)` a type (`NotFound`), register it again with another schema (`Unsupported`, `reason: "schema_changed"`), or call `terminate(_:with:where:)`, for example with `MCPError.forbidden()` when a principal lost access. A `check` that throws `NotFound`, `Forbidden` or `Unsupported` ends its stream the same way. `stop()` ends every stream with its result before it closes the transport. Over `StatelessHTTPServerTransport`, `events/stream` needs `text/event-stream` in `Accept` (406 otherwise), carries no `: keep-alive` comments (the heartbeat does that job), and `Mcp-Name` must carry the event name.
+
 ## Server Cards
 
 A Server Card is a public JSON document that describes a server before a client connects: its name, version, description, endpoints and the protocol versions they serve (SEP-2127). It lists no tools, resources or prompts, and no capabilities. The SDK follows the `modelcontextprotocol/ext-server-card` extension at `526201bb`. Clients find a card's URL in an AI Catalog, or at the recommended location, `<endpoint>/server-card`:

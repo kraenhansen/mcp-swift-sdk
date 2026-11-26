@@ -606,3 +606,42 @@ struct SkillSnippetTests {
         await server.stop()
     }
 }
+
+@Suite("Event snippets", .timeLimit(.minutes(1)))
+struct EventSnippetTests {
+    @Test("An emitted incident reaches the stream whose severity matches")
+    func emitted() async throws {
+        let server = await makeEventsServer()
+        let client = try await connect(server, mode: .automatic)
+        let subscription = try await client.streamEvents(
+            .init(name: "incident.created", arguments: ["severity": "P1"]))
+        try await incidentOpened(id: "INC-2", severity: "P2")
+        try await incidentOpened(id: "INC-1", severity: "P1")
+        var messages = subscription.messages.makeAsyncIterator()
+        guard case .event(let event) = try await messages.next() else {
+            Issue.record("no event")
+            return
+        }
+        #expect(event.eventId == "INC-1")
+        await subscription.cancel()
+        await client.disconnect()
+        await server.stop()
+    }
+
+    @Test("A check type reads the log from the cursor")
+    func check() async throws {
+        let log = TicketLog()
+        let server = Server(name: "tickets", version: "1")
+        await server.withEvents(EventRegistry([ticketEvents(log: log)]))
+        let client = try await connect(server, mode: .automatic)
+        let start = try await client.pollEvents(.init(name: "ticket.updated", arguments: ["queue": "web"]))
+        await log.append(.init(id: "c1", queue: "web", status: "open"))
+        await log.append(.init(id: "c2", queue: "ops", status: "open"))
+        let polled = try await client.pollEvents(
+            .init(name: "ticket.updated", arguments: ["queue": "web"], cursor: start.cursor))
+        #expect(polled.events.map(\.eventId) == ["c1"])
+        #expect(polled.cursor == "2")
+        await client.disconnect()
+        await server.stop()
+    }
+}

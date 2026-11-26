@@ -466,7 +466,7 @@ The server then:
 
 An emit-only type, one without `check`, is served from the registry's buffer (`EventBuffer`, by default 10 minutes and 10,000 occurrences per type). Its cursors name the process: a cursor from before a restart, or one the buffer has evicted, gets `truncated: true` and a fresh cursor, and so does one older than the request's `maxAgeMs`. `match` decides which subscriptions, by their arguments, receive an occurrence; a stream still advances its cursor past the ones it skips. A stream whose client falls `maxEvents` occurrences behind is closed with its result, and the client resumes from its cursor.
 
-A type whose upstream can answer "what happened since this cursor" has a `check` function instead. The same function serves poll and push: a poll calls it once, and a stream calls it every `checkInterval`, or at once while it returns `hasMore`. A `check` asked for a `nil` cursor returns the current position and no events:
+A type whose upstream can answer "what happened since this cursor" has a `check` function instead. The same function serves poll and push: a poll calls it once, and a stream calls it every `checkInterval`, or at once while it returns `hasMore`. When the host itself changes the upstream, `wake(_:)` makes the type's streams check now instead of at the end of the interval; wakes before a check starts share it, and a wake during a check makes the stream check again right after. A `check` asked for a `nil` cursor returns the current position and no events:
 
 %include Examples/Snippets/Server/Events.swift events-check
 

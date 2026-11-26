@@ -80,7 +80,8 @@ like a `TaskManager`; `withEvents(_:)` attaches a server for list-changed notifi
 - **`check` types**: poll calls `check` once (a `nil` cursor bootstraps: the events are
   dropped, the cursor kept); the SDK drops occurrences older than `maxAgeMs` and reports
   `truncated`. An event without a cursor of its own gets the cursor before its batch, the last
-  one the batch's, so every cursor sent is safe to persist. `emit` refuses these types.
+  one the batch's, so every cursor sent is safe to persist. `emit` refuses these types;
+  `wake(name)` tells their streams the upstream changed (see below).
 
 ### `events/stream`
 
@@ -96,11 +97,33 @@ The handler follows `serveListen`:
    replay, then each item as it comes. Only the handler task writes, so `active` is first.
 5. A heartbeat task yields `.heartbeat` into the same stream every interval, and a `check` task
    yields batches; both are cancelled in `defer`. The heartbeat carries the cursor of the last
-   item, including `advance` items for occurrences the stream's `match` skipped.
+   item, including `advance` items for occurrences the stream's `match` skipped. The `check`
+   task waits `checkInterval` between checks, or less after `wake` (below).
 6. `notifications/cancelled` cancels the handler task, which ends the `for await` and throws;
    no result is sent. `terminated` (from `unregister`, a schema change, `terminate`, or a
    `check` that throws `NotFound`, `Forbidden` or `Unsupported`), the end of the item stream
    (`stop()`, an overflowing stream) and the registry closing it end the loop with the result.
+
+### Waking `check` streams
+
+A host that writes the upstream itself knows when it changed, but a `check` stream would see the
+change only after its `checkInterval`. `EventRegistry.wake(_:)` ends that wait for every stream
+of the type. Each stream holds an `EventCheckWake`, registered with the stream in `openStream`:
+`wake()` marks a check owed and resumes the waiting check task, and the task clears the mark when
+it starts a check. So:
+
+- wakes before a check starts share it: several during one wait cause one early check;
+- a wake during a check is kept, and the stream checks again right after, so a change committed
+  just before the wake does not wait for the next interval;
+- the wait after a woken check is a full `checkInterval` again; a `hasMore` batch still checks at
+  once;
+- `events/poll`, the heartbeat task and emit-only types are untouched, and a name without open
+  streams is ignored.
+
+`EventCheckWake` follows `SessionIDSignal` in `HTTPClientTransport`: a lock-guarded class whose
+wait ends on a signal, a timer or cancellation, whichever comes first, so `wake` stays a
+synchronous registry call. `wake` is not in the specification; it only changes when the server
+checks.
 
 `stop()` finishes the streams of its server and waits for their results before it disconnects,
 as for listen streams. A stream that falls `buffer.maxEvents` items behind is finished: its

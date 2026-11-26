@@ -518,6 +518,7 @@ public actor Client {
     /// Waiters for `subscriptions/listen` acknowledgements, by request id.
     private var listenAcknowledgements:
         [ID: AsyncStream<Result<SubscriptionFilter, Swift.Error>>.Continuation] = [:]
+    var eventRoutes: [ID: EventRoute] = [:]
     /// `x-mcp-header` arguments of listed tools, by tool name.
     private(set) var toolHeaderParameters: [String: [MCPRequestHeaders.Parameter]] = [:]
     /// The `execution.taskSupport` of each listed tool, for 2025-11-25 augmentation.
@@ -603,6 +604,8 @@ public actor Client {
     private static let inlineNotifications: Set<String> = [
         CancelledNotification.name, SubscriptionsAcknowledgedNotification.name,
         TaskStatusNotification.name, TaskUpdatedNotification.name,
+        EventsActiveNotification.name, EventNotification.name, EventsHeartbeatNotification.name,
+        EventsErrorNotification.name, EventsTerminatedNotification.name,
     ]
     // Add reusable JSON encoder/decoder
     private let encoder = JSONEncoder()
@@ -1788,6 +1791,9 @@ public actor Client {
                 let params = Self.decode(message.params, as: SubscriptionsAcknowledgedNotification.Parameters.self)
             else { return }
             acknowledge(id, params.notifications)
+        case EventsActiveNotification.name, EventNotification.name, EventsHeartbeatNotification.name,
+            EventsErrorNotification.name, EventsTerminatedNotification.name:
+            routeEvent(message)
         case TaskStatusNotification.name, TaskUpdatedNotification.name:
             guard let id = message.params.objectValue?["taskId"]?.stringValue else { return }
             let waiting = taskWakeups.removeValue(forKey: id) ?? [:]

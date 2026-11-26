@@ -377,6 +377,7 @@ public actor Server {
     /// The tasks handling `subscriptions/listen` requests, by request id, so
     /// that ``stop()`` can wait for the results of the streams it ends.
     private var listenRequests: [ID: Task<Void, Never>] = [:]
+    private var eventStreams: [ID: AsyncStream<EventStreamItem>.Continuation] = [:]
     /// Whether ``stop()`` is ending the listen streams; a stream that would
     /// open meanwhile is refused.
     private var isStopping = false
@@ -535,7 +536,8 @@ public actor Server {
                         } else if let request = try? decoder.decode(AnyRequest.self, from: data) {
                             // Handle request in a separate task to avoid blocking the receive loop
                             startingRequests[request.id] = false
-                            let isListen = request.method == SubscriptionsListen.name
+                            let isListen =
+                                request.method == SubscriptionsListen.name || request.method == StreamEvents.name
                             let handling = Task {
                                 _ = try? await self.handleRequest(
                                     request, sendResponse: true, generation: generation)
@@ -610,9 +612,12 @@ public actor Server {
         isStopping = true
         defer { isStopping = false }
         closeSubscriptions()
+        for stream in eventStreams.values { stream.finish() }
         // The handlers resume only once this suspends: closing the
         // transport first lost their results.
-        let ending = listeners.values.compactMap { listenRequests[$0.context.id] }
+        let ending =
+            listeners.values.compactMap { listenRequests[$0.context.id] }
+            + eventStreams.keys.compactMap { listenRequests[$0] }
         for handling in ending { await handling.value }
 
         if let manager = taskManager, let token = taskObserver {
@@ -796,7 +801,7 @@ public actor Server {
     }
 
     /// Registers a default handler unless the application registered one.
-    private func registerDefault<M: Method>(
+    func registerDefault<M: Method>(
         _ type: M.Type, handler: @escaping @Sendable (M.Parameters) async throws -> M.Result
     ) {
         guard methodHandlers[M.name] == nil || defaultHandlerMethods.contains(M.name) else { return }
@@ -1093,6 +1098,12 @@ public actor Server {
     /// capabilities the SDK derives.
     private func advertisedCapabilities(for version: String?) -> Capabilities {
         var advertised = capabilities
+        if version.map(Version.profile(for:))?.usesSubscriptionsListen != true,
+            advertised.extensions?[ExtensionID.events] != nil
+        {
+            advertised.extensions?[ExtensionID.events] = nil
+            if advertised.extensions?.isEmpty == true { advertised.extensions = nil }
+        }
         guard let manager = taskManager else { return advertised }
         switch version.map(Version.profile(for:))?.taskGeneration {
         case .v2?:
@@ -1169,6 +1180,24 @@ public actor Server {
         var extensions = capabilities.extensions ?? [:]
         extensions[ExtensionID.ui] = [:]
         capabilities.extensions = extensions
+    }
+
+    // MARK: - Events (SEP-3415)
+
+    func beginEventStream(_ id: ID, _ items: AsyncStream<EventStreamItem>.Continuation) throws {
+        guard !isStopping, connection != nil else { throw MCPError.internalError("Server stopped") }
+        eventStreams[id] = items
+    }
+
+    func endEventStream(_ id: ID) {
+        eventStreams[id] = nil
+    }
+
+    var openEventStreamCount: Int { eventStreams.count }
+
+    func sendOnStream<N: Notification>(_ message: Message<N>, of id: ID) async throws {
+        guard let connection else { throw MCPError.internalError("Server connection not initialized") }
+        try await connection.send(encoder.encode(message), relatedRequestID: id)
     }
 
     /// Adds `source`, or replaces the source with its key, and declares the
@@ -1472,6 +1501,7 @@ public actor Server {
         let notificationData = try encoder.encode(notification)
         if let event = SubscriptionEvent(notification) {
             publish(event, to: recipients)
+            if event == .eventsListChanged { return }
             // A handshake handler behind a sessionless transport sends it
             // on its own request's stream, when `recipients` accepts that
             // caller: one server serves every client there.
@@ -1558,7 +1588,9 @@ public actor Server {
             resourceSubscriptions: capabilities.resources?.subscribe == true
                 && requested.resourceSubscriptions?.isEmpty == false
                 ? requested.resourceSubscriptions : nil,
-            taskIds: requested.taskIds?.isEmpty == false ? requested.taskIds : nil)
+            taskIds: requested.taskIds?.isEmpty == false ? requested.taskIds : nil,
+            eventsListChanged: requested.eventsListChanged == true
+                && EventsSettings(capabilities.extensions)?.listChanged == true ? true : nil)
     }
 
     /// The requested filter with duplicate URIs removed; throws -32602 for

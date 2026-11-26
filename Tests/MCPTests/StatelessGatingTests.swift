@@ -186,6 +186,29 @@ struct StatelessGatingTests {
     }
 
     @Test(
+        "events/* are -32601 at 2025-11-25, and at 2026-07-28 on a server without events",
+        arguments: [ListEvents.name, PollEvents.name, StreamEvents.name, "events/subscribe"])
+    func eventsGating(_ method: String) async throws {
+        let events = Server(name: "events", version: "1")
+        await events.withEvents(EventRegistry([EventType(name: "a")]))
+        let transport = MockTransport()
+        try await events.start(transport: transport)
+        defer { Task { await events.stop() } }
+        let handshake = try await exchange(
+            transport, #"{"jsonrpc":"2.0","id":13,"method":"\#(method)","params":{"name":"a"}}"#)
+        expectWire(handshake, matches: try wireJSON(#"{"id":13,"error":{"code":-32601}}"#))
+
+        let plain = await makeServer(Calls())
+        let plainTransport = MockTransport()
+        try await plain.start(transport: plainTransport)
+        defer { Task { await plain.stop() } }
+        let stateless = try await exchange(
+            plainTransport,
+            #"{"jsonrpc":"2.0","id":14,"method":"\#(method)","params":{"name":"a",\#(meta.replacingOccurrences(of: "NAME", with: "c"))}}"#)
+        expectWire(stateless, matches: try wireJSON(#"{"id":14,"error":{"code":-32601}}"#))
+    }
+
+    @Test(
         "The stateless HTTP transport lists the server's versions in -32022",
         arguments: ["2025-11-25", "2099-01-01"])
     func transportListsServedVersions(_ version: String) async throws {

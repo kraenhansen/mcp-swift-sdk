@@ -25,6 +25,8 @@ enum StatelessRequests {
     /// Methods that exist only at 2026-07-28 and later.
     static let statelessOnlyMethods: Set<String> = [
         ServerDiscover.name, SubscriptionsListen.name, UpdateTask.name,
+        ListEvents.name, PollEvents.name, StreamEvents.name,
+        EventWebhookMethods.subscribe, EventWebhookMethods.unsubscribe,
     ]
 
     /// Methods whose results carry SEP-2549 cache hints.
@@ -113,6 +115,8 @@ enum StatelessRequests {
             return SkillsSettings(capabilities.extensions) != nil
         case ReadResourceDirectory.name:
             return SkillsSettings(capabilities.extensions)?.directoryRead == true
+        case ListEvents.name, PollEvents.name, StreamEvents.name:
+            return EventsSettings(capabilities.extensions) != nil
         default:
             return true
         }

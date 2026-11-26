@@ -11,6 +11,13 @@ private func decoded<T: Decodable>(_ type: T.Type, _ json: String) throws -> T {
     try JSONDecoder().decode(T.self, from: Data(json.utf8))
 }
 
+private func statelessMessage(id: Int, method: String, params: [String: Value] = [:]) -> String {
+    var params = params
+    params["_meta"] = [MetaKey.protocolVersion: .string(Version.v2026_07_28), MetaKey.clientCapabilities: [:]]
+    let value: Value = ["jsonrpc": "2.0", "id": .int(id), "method": .string(method), "params": .object(params)]
+    return String(decoding: try! JSONEncoder().encode(value), as: UTF8.self)
+}
+
 @Suite("Event wire types")
 struct EventTests {
     @Test("A descriptor encodes the spec members; absent schemas and delivery decode with defaults")
@@ -131,5 +138,26 @@ struct EventTests {
             #expect(MCPRequestHeaders.nameValue(method: method, params: ["name": "email.received"]) == "email.received")
         }
         #expect(MCPRequestHeaders.nameValue(method: ListEvents.name, params: ["cursor": "c"]) == nil)
+    }
+
+    @Test("events/list and events/poll results carry resultType complete at 2026-07-28")
+    func resultType() async throws {
+        let server = Server(name: "s", version: "1")
+        await server.withEvents(EventRegistry([EventType(name: "a")]))
+        let wire = WireExchange(server: server)
+        try await wire.start()
+        defer { Task { await wire.stop() } }
+        let listed = try await wire.send(statelessMessage(id: 1, method: ListEvents.name))
+        expectWire(
+            listed[0],
+            matches: try wireJSON(
+                #"{"id":1,"result":{"resultType":"complete","events":[{"name":"a","delivery":["poll","push"],"inputSchema":{"type":"object"},"payloadSchema":{"type":"object"}}]}}"#
+            ))
+        let polled = try await wire.send(statelessMessage(id: 2, method: PollEvents.name, params: ["name": "a"]))
+        expectWire(
+            polled[0],
+            matches: try wireJSON(
+                #"{"id":2,"result":{"resultType":"complete","events":[],"cursor":"<any>","truncated":false,"hasMore":false,"nextPollMs":5000}}"#
+            ))
     }
 }

@@ -36,8 +36,9 @@ import Logging
 /// - An open SSE stream carries a `: keep-alive` comment every
 ///   `keepAliveInterval` (15 seconds by default), so that idle streams such
 ///   as `subscriptions/listen` are not closed by client or proxy timeouts.
-/// - `subscriptions/listen` without `text/event-stream` in `Accept` is
-///   answered with 406: its notifications need an SSE stream.
+///   `events/stream` streams carry none: their heartbeat notifications do it.
+/// - `subscriptions/listen` and `events/stream` without `text/event-stream`
+///   in `Accept` are answered with 406: their notifications need an SSE stream.
 ///
 /// ## Usage
 ///
@@ -355,19 +356,21 @@ public actor StatelessHTTPServerTransport: Transport, HTTPContextProviding {
             if let mismatch = Self.versionHeaderError(request, metaVersion: fields.metaProtocolVersion) {
                 return .error(statusCode: 400, mismatch, id: requestID)
             }
-            if case .request(_, SubscriptionsListen.name) = messageKind,
+            let method: String? = if case .request(_, let method) = messageKind { method } else { nil }
+            if let method, method == SubscriptionsListen.name || method == StreamEvents.name,
                 !(request.header(HTTPHeaderName.accept) ?? "").contains(ContentType.sse)
             {
                 return .error(
                     statusCode: 406,
-                    .invalidRequest("\(SubscriptionsListen.name) requires Accept: \(ContentType.sse)"),
+                    .invalidRequest("\(method) requires Accept: \(ContentType.sse)"),
                     id: requestID)
             }
             return await handleJSONRPCRequest(
                 normalized,
                 clientID: requestID,
                 isStateless: request.statelessProtocolVersion != nil || !servesHandshake,
-                request: request
+                request: request,
+                sendsKeepAlive: method != StreamEvents.name
             )
         }
     }
@@ -440,7 +443,8 @@ public actor StatelessHTTPServerTransport: Transport, HTTPContextProviding {
         _ body: Data,
         clientID: ID,
         isStateless: Bool,
-        request: HTTPRequest
+        request: HTTPRequest,
+        sendsKeepAlive: Bool = true
     ) async -> HTTPResponse {
         let internalID = "mcp-http-\(UUID().uuidString)"
         guard let rewritten = JSONRPCMessageFields.replacingID(in: body, with: .string(internalID))
@@ -455,7 +459,7 @@ public actor StatelessHTTPServerTransport: Transport, HTTPContextProviding {
 
         let acceptsSSE = (request.header(HTTPHeaderName.accept) ?? "").contains(ContentType.sse)
         let logger = self.logger
-        let keepAliveInterval = self.keepAliveInterval
+        let keepAliveInterval = sendsKeepAlive ? self.keepAliveInterval : nil
         // The adapter cancels this task when the client goes away before the
         // response is decided: cancel the request, as for a closed SSE stream.
         return await withTaskCancellationHandler {

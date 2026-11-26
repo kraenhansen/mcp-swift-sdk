@@ -723,7 +723,7 @@ struct HTTPClientConnectionLimitTests {
 #if swift(>=6.1)
     @Suite("HTTP client listen requests")
     struct HTTPClientListenTimeoutTests {
-        @Test("A subscriptions/listen POST has a long idle timeout; other POSTs keep the default")
+        @Test("subscriptions/listen and events/stream POSTs have a long idle timeout; other POSTs keep the default")
         func listenTimeout() async throws {
             let key = UUID().uuidString
             let configuration = URLSessionConfiguration.ephemeral
@@ -743,7 +743,10 @@ struct HTTPClientConnectionLimitTests {
             try await transport.send(Data(#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#.utf8))
             try await transport.send(
                 Data(#"{"jsonrpc":"2.0","id":1,"method":"subscriptions/listen","params":{"notifications":{}}}"#.utf8))
-            #expect(await timeouts.values == [60, HTTPClientTransport.listenIdleTimeout])
+            try await transport.send(
+                Data(#"{"jsonrpc":"2.0","id":2,"method":"events/stream","params":{"name":"a"}}"#.utf8))
+            #expect(
+                await timeouts.values == [60, HTTPClientTransport.listenIdleTimeout, HTTPClientTransport.listenIdleTimeout])
             await transport.disconnect()
         }
     }

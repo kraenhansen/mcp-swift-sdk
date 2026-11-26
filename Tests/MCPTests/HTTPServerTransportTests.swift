@@ -1825,3 +1825,93 @@ struct StatefulReplayStoreTests {
     }
 }
 
+
+// MARK: - Events (SEP-3415)
+
+private func eventsRequest(
+    _ id: String, _ method: String, _ params: String, accept: String = "application/json, text/event-stream",
+    name: String?? = .none
+) -> HTTPRequest {
+    let body =
+        #"{"jsonrpc":"2.0","id":"\#(id)","method":"\#(method)","params":{\#(params),"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}"#
+    var headers = [
+        "Content-Type": "application/json", "Accept": accept, HTTPHeaderName.protocolVersion: "2026-07-28",
+        MCPRequestHeaders.method: method,
+    ]
+    let derived = (try? JSONDecoder().decode(Value.self, from: Data(body.utf8)))
+        .flatMap { MCPRequestHeaders.nameValue(method: method, params: $0.objectValue?["params"]) }
+    if let value = name ?? derived { headers[MCPRequestHeaders.name] = value }
+    return HTTPRequest(method: "POST", headers: headers, body: Data(body.utf8), path: "/mcp")
+}
+
+@Suite("Events over the stateless HTTP transport", .timeLimit(.minutes(1)))
+struct StatelessHTTPEventsTests {
+    private func start(_ registry: EventRegistry) async throws -> (Server, StatelessHTTPServerTransport) {
+        let server = Server(name: "events", version: "1", capabilities: .init(tools: .init(listChanged: true)))
+        await server.withEvents(registry)
+        let transport = StatelessHTTPServerTransport(
+            validationPipeline: StandardValidationPipeline(validators: []), keepAliveInterval: .milliseconds(10))
+        try await server.start(transport: transport)
+        return (server, transport)
+    }
+
+    @Test("events/stream without text/event-stream in Accept is refused with 406")
+    func needsSSE() async throws {
+        let registry = EventRegistry([EventType(name: "a")])
+        let (server, transport) = try await start(registry)
+        defer { Task { await server.stop() } }
+        let response = await transport.handleRequest(
+            eventsRequest("s", StreamEvents.name, #""name":"a""#, accept: "application/json"))
+        #expect(response.statusCode == 406)
+        #expect(await registry.openStreamCount == 0)
+    }
+
+    @Test("Mcp-Name must carry params.name on events/poll and events/stream; events/list has none")
+    func mcpName() async throws {
+        let (server, transport) = try await start(EventRegistry([EventType(name: "a")]))
+        defer { Task { await server.stop() } }
+        for method in [PollEvents.name, StreamEvents.name] {
+            for name: String? in [nil, "b"] {
+                let response = await transport.handleRequest(eventsRequest("x", method, #""name":"a""#, name: .some(name)))
+                #expect(response.statusCode == 400)
+                let body = try JSONDecoder().decode(Value.self, from: try #require(response.bodyData))
+                #expect(body.objectValue?["error"]?.objectValue?["code"] == -32020)
+            }
+        }
+        let polled = await transport.handleRequest(eventsRequest("p", PollEvents.name, #""name":"a""#))
+        #expect(polled.statusCode == 200)
+        let listed = await transport.handleRequest(eventsRequest("l", ListEvents.name, #""cursor":null"#))
+        #expect(listed.statusCode == 200)
+    }
+
+    @Test("A stream carries the client's id and heartbeats, and no keep-alive comments")
+    func stream() async throws {
+        let registry = EventRegistry(
+            [EventType(name: "a")], configuration: .init(heartbeatRange: .milliseconds(10)...(.seconds(300))))
+        let (server, transport) = try await start(registry)
+        defer { Task { await server.stop() } }
+
+        let listen = await transport.handleRequest(
+            eventsRequest("l", SubscriptionsListen.name, #""notifications":{"toolsListChanged":true}"#))
+        let events = await transport.handleRequest(
+            eventsRequest("s", StreamEvents.name, #""name":"a","heartbeatMs":10"#))
+        guard case .stream(let listenStream, _) = listen, case .stream(let eventStream, _) = events else {
+            Issue.record("expected SSE streams, got \(listen.statusCode) and \(events.statusCode)")
+            return
+        }
+        var listenChunks: [String] = []
+        for try await chunk in listenStream {
+            listenChunks.append(String(decoding: chunk, as: UTF8.self))
+            if listenChunks.filter({ $0.hasPrefix(":") }).count == 3 { break }
+        }
+        var eventChunks: [String] = []
+        for try await chunk in eventStream {
+            eventChunks.append(String(decoding: chunk, as: UTF8.self))
+            if eventChunks.count == 4 { break }
+        }
+        #expect(eventChunks.first?.contains(EventsActiveNotification.name) == true)
+        #expect(eventChunks.first?.contains(#""io.modelcontextprotocol/subscriptionId":"s""#) == true)
+        #expect(eventChunks.dropFirst().allSatisfy { $0.contains(EventsHeartbeatNotification.name) })
+        #expect(!eventChunks.contains { $0.hasPrefix(":") })
+    }
+}

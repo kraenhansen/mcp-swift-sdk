@@ -580,7 +580,7 @@ public actor HTTPClientTransport: Transport {
             )
             request.addValue(ContentType.json, forHTTPHeaderField: HTTPHeaderName.contentType)
             request.httpBody = message.data
-            if message.method == SubscriptionsListen.name {
+            if message.method == SubscriptionsListen.name || message.method == StreamEvents.name {
                 request.timeoutInterval = Self.listenIdleTimeout
             }
 

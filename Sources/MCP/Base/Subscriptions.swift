@@ -14,6 +14,8 @@ public struct SubscriptionFilter: Hashable, Codable, Sendable {
     /// Receive `notifications/tasks` for these tasks (the tasks extension,
     /// SEP-2663).
     public var taskIds: [String]?
+    /// Receive `notifications/events/list_changed` (the events extension, SEP-3415).
+    public var eventsListChanged: Bool?
 
     /// Creates a filter. A `nil` type is not requested.
     public init(
@@ -21,8 +23,10 @@ public struct SubscriptionFilter: Hashable, Codable, Sendable {
         promptsListChanged: Bool? = nil,
         resourcesListChanged: Bool? = nil,
         resourceSubscriptions: [String]? = nil,
-        taskIds: [String]? = nil
+        taskIds: [String]? = nil,
+        eventsListChanged: Bool? = nil
     ) {
+        self.eventsListChanged = eventsListChanged
         self.toolsListChanged = toolsListChanged
         self.promptsListChanged = promptsListChanged
         self.resourcesListChanged = resourcesListChanged
@@ -112,6 +116,7 @@ enum SubscriptionEvent: Hashable, Sendable {
     case resourceUpdated(uri: String)
     /// A task changed; `snapshot` is the task as `tasks/get` returns it.
     case task(id: String, snapshot: Value)
+    case eventsListChanged
 
     /// The event a notification announces, if it belongs on listen streams.
     /// Only a resource-updated notification's parameters are read.
@@ -120,6 +125,7 @@ enum SubscriptionEvent: Hashable, Sendable {
         case ToolListChangedNotification.name: self = .toolsListChanged
         case PromptListChangedNotification.name: self = .promptsListChanged
         case ResourceListChangedNotification.name: self = .resourcesListChanged
+        case EventsListChangedNotification.name: self = .eventsListChanged
         case ResourceUpdatedNotification.name:
             let uri =
                 (notification.params as? ResourceUpdatedNotification.Parameters)?.uri
@@ -136,6 +142,7 @@ enum SubscriptionEvent: Hashable, Sendable {
         case ToolListChangedNotification.name: self = .toolsListChanged
         case PromptListChangedNotification.name: self = .promptsListChanged
         case ResourceListChangedNotification.name: self = .resourcesListChanged
+        case EventsListChangedNotification.name: self = .eventsListChanged
         case ResourceUpdatedNotification.name:
             guard let uri = params?.objectValue?["uri"]?.stringValue else { return nil }
             self = .resourceUpdated(uri: uri)
@@ -150,6 +157,7 @@ enum SubscriptionEvent: Hashable, Sendable {
         case .resourcesListChanged: return filter.resourcesListChanged == true
         case .resourceUpdated(let uri): return filter.resourceSubscriptions?.contains(uri) == true
         case .task(let id, _): return filter.taskIds?.contains(id) == true
+        case .eventsListChanged: return filter.eventsListChanged == true
         }
     }
 
@@ -178,6 +186,8 @@ enum SubscriptionEvent: Hashable, Sendable {
             return Message(method: ResourceUpdatedNotification.name, params: ["uri": .string(uri)], _meta: meta)
         case .task(_, let snapshot):
             return Message(method: TaskUpdatedNotification.name, params: snapshot, _meta: meta)
+        case .eventsListChanged:
+            return Message(method: EventsListChangedNotification.name, params: [:], _meta: meta)
         }
     }
 }

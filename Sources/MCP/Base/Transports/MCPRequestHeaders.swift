@@ -77,8 +77,9 @@ public enum MCPRequestHeaders {
 
     // MARK: - Standard headers
 
-    /// The `Mcp-Name` value of a request: `params.name` for `tools/call` and
-    /// `prompts/get`, `params.uri` for `resources/read`, `params.taskId` for
+    /// The `Mcp-Name` value of a request: `params.name` for `tools/call`,
+    /// `prompts/get` and the `events/*` methods other than `events/list`,
+    /// `params.uri` for `resources/read`, `params.taskId` for
     /// `tasks/get`, `tasks/update` and `tasks/cancel`.
     public static func nameValue(method: String, params: Value?) -> String? {
         let object = params?.objectValue
@@ -91,7 +92,9 @@ public enum MCPRequestHeaders {
     /// `params.uri` and `params.taskId`.
     static func nameValue(method: String, name: String?, uri: String?, taskID: String?) -> String? {
         switch method {
-        case CallTool.name, GetPrompt.name: return name
+        case CallTool.name, GetPrompt.name, PollEvents.name, StreamEvents.name, EventWebhookMethods.subscribe,
+            EventWebhookMethods.unsubscribe:
+            return name
         case ReadResource.name: return uri
         case GetTask.name, UpdateTask.name, CancelTask.name: return taskID
         default: return nil
